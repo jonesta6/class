@@ -1,0 +1,48 @@
+-- Get a base set of data to determine time on page for all pages
+with base as (
+  SELECT 
+  timestamp_micros(event_timestamp) as event_timestamp   
+  batch_page_id, 
+  event_name,
+  concat(user_pseudo_id, 
+  (SELECT params.value.string_value FROM unnest(event_params) params WHERE params.key = 'ga_session_id') 
+         as user_session      
+  FROM `yourproject.yourdataset.events_*`
+  WHERE cast(_table_suffix as date) >= '2025-01-01'
+  ),
+  
+-- Add in timing differences and order events by timestamp
+timing as (
+  SELECT 
+  event_name, 
+  event_timestap,
+  user_session,
+  batch_page_id,
+  CASE WHEN event_name = 'page_view' THEN
+    FIRST_VALUE(event_timestamp) OVER (PARTITION BY user_session, batch_page_id ORDER BY event_timestamp)
+      END as first_pv_timestamp,
+  CASE WHEN event_name = 'user_engagement' THEN event_timestamp END as next_pv_timestamp,
+  CASE WHEN event_name <> 'page_view' THEN 
+    ROW_NUMBER() OVER (PARTITION BY user_session, batch_page_id ORDER BY event_timestamp)
+      END as event_row
+  FROM base
+  ),
+  
+-- Get the timing of the last event per page
+last_event as (
+  SELECT 
+  DISTINCT batch_page_id, 
+  user_session,
+  first_pv_timestamp,
+  next_pv_timestamp,
+  FIRST_VALUE(event_timestamp) OVER (PARTITION BY user_session, batch_page_id ORDER BY event_timestamp DESC)
+    as last_event_timestamp
+  FROM timing
+  )
+
+-- Get the time on page in seconds
+  SELECT
+  DISTINCT batch_page_id,
+  user_session,
+  TIMESTAMP_DIFF(COALESCE(next_pv_timestamp, last_event_timestamp), second) as time_on_page
+  FROM last_event
